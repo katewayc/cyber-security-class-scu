@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CSRF 攻擊原理與 Checkmarx 風險檢測示範</title>
+    <style>
+        :root { --bg-color: #f0f2f5; --card-bg: #ffffff; --primary: #0066cc; --danger: #dc3545; --success: #28a745; --text: #333; --path-stroke: #b0b0b0; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; background-color: var(--bg-color); color: var(--text); display: flex; flex-direction: column; align-items: center; padding: 20px; margin: 0; }
+        h1 { margin-bottom: 10px; text-align: center; }
+        p { text-align: center; color: #666; max-width: 600px; margin-bottom: 20px; }
+        .container { background: var(--card-bg); border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.1); padding: 20px; width: 100%; max-width: 900px; position: relative; }
+        svg { width: 100%; height: 450px; border: 1px solid #eee; border-radius: 8px; background: #fafafa; }
+        .node-box { fill: white; stroke-width: 2; rx: 8; filter: drop-shadow(0 2px 3px rgba(0,0,0,0.1)); }
+        .node-text { font-size: 14px; font-weight: bold; text-anchor: middle; dominant-baseline: middle; fill: #333; }
+        .label-text { font-size: 12px; fill: #666; text-anchor: middle; }
+        .connection { fill: none; stroke: var(--path-stroke); stroke-width: 2; stroke-dasharray: 5,5; }
+        .packet { fill: var(--primary); display: none; }
+        .cookie { fill: #ffa500; font-size: 12px; }
+        .scanner-box { fill: #2d2d2d; rx: 6; }
+        .code-line { stroke-width: 4; stroke-linecap: round; }
+        .risk-indicator { font-weight: bold; font-size: 16px; }
+        .controls { display: flex; gap: 15px; justify-content: center; margin-top: 20px; padding-top: 20px; border-top: 1px solid #eee; }
+        button { padding: 10px 20px; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; transition: all 0.2s; font-size: 14px; }
+        #btn-attack { background-color: var(--danger); color: white; }
+        #btn-attack:disabled { background-color: #e2aab0; cursor: not-allowed; }
+        #btn-toggle-fix { background-color: var(--primary); color: white; }
+        #btn-reset { background-color: #6c757d; color: white; }
+        .log-panel { margin-top: 15px; background: #2d2d2d; color: #0f0; font-family: monospace; padding: 10px; border-radius: 6px; height: 80px; overflow-y: auto; font-size: 13px; }
+        
+        /* Navigation Button */
+        .nav-btn { position: absolute; top: 20px; right: 20px; text-decoration: none; background: #333; color: white; padding: 8px 15px; border-radius: 4px; font-size: 14px; }
+        .nav-btn:hover { background: #555; }
+    </style>
+</head>
+<body>
+    <a href="xss_demo.html" class="nav-btn">前往 XSS 演示 ➜</a>
+
+    <h1>CSRF 攻擊與 Checkmarx 風險分析</h1>
+    <p>演示重點：瀏覽器會自動帶入 Cookie，導致伺服器無法分辨「誰」發起了請求。</p>
+
+    <div class="container">
+        <svg id="mainSvg" viewBox="0 0 800 450">
+            <defs>
+                <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L0,6 L9,3 z" fill="#b0b0b0" /></marker>
+                <marker id="arrow-red" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L0,6 L9,3 z" fill="#dc3545" /></marker>
+            </defs>
+            <g transform="translate(50, 250)">
+                <rect class="node-box" x="0" y="0" width="120" height="80" stroke="#dc3545"></rect>
+                <text x="60" y="30" class="node-text">惡意網站</text>
+                <text x="60" y="50" class="label-text">(Attacker.com)</text>
+                <rect x="40" y="55" width="40" height="15" rx="2" fill="#eee" stroke="#999" stroke-width="1"></rect>
+                <text x="60" y="66" font-size="9" text-anchor="middle" fill="#555">隱藏表單</text>
+            </g>
+            <g transform="translate(340, 320)">
+                <rect class="node-box" x="0" y="0" width="120" height="80" stroke="#333"></rect>
+                <text x="60" y="30" class="node-text">受害者瀏覽器</text>
+                <text x="60" y="50" class="label-text">已登入銀行</text>
+                <circle cx="20" cy="65" r="8" fill="#ffa500" />
+                <text x="60" y="70" font-size="10" fill="#333">Session Cookie</text>
+            </g>
+            <g transform="translate(630, 250)">
+                <rect class="node-box" x="0" y="0" width="120" height="80" stroke="#0066cc"></rect>
+                <text x="60" y="30" class="node-text">銀行伺服器</text>
+                <text x="60" y="50" class="label-text">(Bank.com)</text>
+                <rect x="40" y="55" width="40" height="15" rx="2" fill="#e3f2fd" stroke="#0066cc"></rect>
+                <text x="60" y="66" font-size="9" text-anchor="middle" fill="#0066cc">轉帳 API</text>
+            </g>
+            <g transform="translate(150, 20)">
+                <rect class="scanner-box" x="0" y="0" width="500" height="120" stroke="#none"></rect>
+                <text x="20" y="25" fill="#fff" font-size="14" font-weight="bold">Checkmarx SAST 掃描儀</text>
+                <g transform="translate(20, 40)">
+                    <rect x="0" y="0" width="280" height="70" fill="#1e1e1e" rx="4"></rect>
+                    <text x="10" y="20" fill="#6a9955" font-family="monospace" font-size="10">// Bank Server Backend Code</text>
+                    <text x="10" y="35" fill="#569cd6" font-family="monospace" font-size="11">function processTransfer(req) {</text>
+                    <text x="25" y="50" fill="#d4d4d4" font-family="monospace" font-size="11" id="code-line-check">  // No CSRF Token Check!</text>
+                    <text x="10" y="65" fill="#569cd6" font-family="monospace" font-size="11">}</text>
+                </g>
+                <g transform="translate(320, 40)">
+                    <rect x="0" y="0" width="160" height="70" fill="#333" rx="4"></rect>
+                    <text x="80" y="20" fill="#aaa" font-size="10" text-anchor="middle">風險等級 (Severity)</text>
+                    <circle cx="80" cy="45" r="18" fill="#dc3545" id="risk-circle"></circle>
+                    <text x="80" y="50" fill="white" text-anchor="middle" class="risk-indicator" id="risk-text">HIGH</text>
+                </g>
+            </g>
+            <path id="path-trap" d="M 400 320 L 110 330" stroke="#dc3545" fill="none" stroke-width="2" marker-end="url(#arrow-red)" opacity="0.3" />
+            <path id="path-auto" d="M 110 330 Q 250 400 340 360" stroke="#dc3545" fill="none" stroke-width="2" marker-end="url(#arrow-red)" opacity="0" />
+            <path id="path-attack" d="M 460 360 Q 550 400 630 310" stroke="#0066cc" fill="none" stroke-width="2" marker-end="url(#arrow)" opacity="0.3" />
+            <circle id="anim-packet" r="6" fill="#dc3545" cx="0" cy="0" opacity="0"></circle>
+            <circle id="anim-cookie" r="5" fill="#ffa500" cx="0" cy="0" opacity="0"></circle>
+        </svg>
+
+        <div class="controls">
+            <button id="btn-toggle-fix" onclick="toggleFix()">開啟 CSRF 防護 (Token)</button>
+            <button id="btn-attack" onclick="startAttack()">模擬攻擊流程</button>
+            <button id="btn-reset" onclick="resetSim()">重置</button>
+        </div>
+
+        <div class="log-panel" id="log-panel">> 系統就緒。等待操作...</div>
+    </div>
+
+    <script>
+        let isProtected = false, isAnimating = false;
+        const logPanel = document.getElementById('log-panel'), codeLine = document.getElementById('code-line-check');
+        const riskCircle = document.getElementById('risk-circle'), riskText = document.getElementById('risk-text');
+        const btnToggle = document.getElementById('btn-toggle-fix'), btnAttack = document.getElementById('btn-attack');
+        const packet = document.getElementById('anim-packet'), cookie = document.getElementById('anim-cookie');
+        const pathTrap = document.getElementById('path-trap'), pathAuto = document.getElementById('path-auto'), pathAttack = document.getElementById('path-attack');
+
+        function log(msg, type='info') {
+            const div = document.createElement('div'); div.textContent = `> ${msg}`;
+            if(type === 'error') div.style.color = '#ff6b6b'; if(type === 'success') div.style.color = '#51cf66'; if(type === 'checkmarx') div.style.color = '#ffd43b';
+            logPanel.appendChild(div); logPanel.scrollTop = logPanel.scrollHeight;
+        }
+
+        function toggleFix() {
+            if (isAnimating) return;
+            isProtected = !isProtected;
+            if (isProtected) {
+                codeLine.textContent = "  checkToken(req.body.token);"; codeLine.setAttribute("fill", "#4ec9b0");
+                riskCircle.setAttribute("fill", "#28a745"); riskText.textContent = "LOW";
+                btnToggle.textContent = "關閉 CSRF 防護 (移除 Token)"; btnToggle.style.backgroundColor = "#dc3545";
+                log("Checkmarx 掃描: 偵測到 Token 驗證，風險已修復。", "checkmarx");
+            } else {
+                codeLine.textContent = "  // No CSRF Token Check!"; codeLine.setAttribute("fill", "#d4d4d4");
+                riskCircle.setAttribute("fill", "#dc3545"); riskText.textContent = "HIGH";
+                btnToggle.textContent = "開啟 CSRF 防護 (Token)"; btnToggle.style.backgroundColor = "#0066cc";
+                log("Checkmarx 掃描: 缺少驗證，高風險。", "checkmarx");
+            }
+            resetSim();
+        }
+
+        function animateAlongPath(element, pathId, duration, callback) {
+            const path = document.getElementById(pathId);
+            const len = path.getTotalLength();
+            let start = null;
+            element.style.opacity = 1;
+            function step(timestamp) {
+                if (!start) start = timestamp;
+                const progress = (timestamp - start) / duration;
+                if (progress < 1) {
+                    const p = path.getPointAtLength(progress * len);
+                    element.setAttribute('cx', p.x); element.setAttribute('cy', p.y);
+                    window.requestAnimationFrame(step);
+                } else {
+                    const p = path.getPointAtLength(len);
+                    element.setAttribute('cx', p.x); element.setAttribute('cy', p.y);
+                    if (callback) callback();
+                }
+            }
+            window.requestAnimationFrame(step);
+        }
+
+        function startAttack() {
+            if (isAnimating) return;
+            isAnimating = true; btnAttack.disabled = true; btnToggle.disabled = true;
+            log("--- 開始攻擊模擬 ---");
+            log("步驟 1: 使用者訪問惡意網站...");
+            pathTrap.style.stroke = "#dc3545"; pathTrap.style.opacity = 1;
+
+            setTimeout(() => {
+                log("步驟 2: 惡意網站強迫瀏覽器發出請求...");
+                pathAuto.style.opacity = 1;
+                animateAlongPath(packet, 'path-auto', 1000, () => {
+                    packet.style.opacity = 0;
+                    log("步驟 3: 瀏覽器自動攜帶 Cookie 前往銀行...");
+                    pathAttack.style.stroke = "#dc3545"; pathAttack.style.opacity = 1;
+                    animateAlongPath(packet, 'path-attack', 1500, null);
+                    animateAlongPath(cookie, 'path-attack', 1500, () => { finishAttack(); });
+                });
+            }, 1000);
+        }
+
+        function finishAttack() {
+            packet.style.opacity = 0; cookie.style.opacity = 0;
+            if (isProtected) {
+                log("銀行檢查: 缺少正確 Token。", "info");
+                setTimeout(() => { 
+                    log("結果: 拒絕交易，攻擊失敗！", "success"); 
+                    alert("攻擊失敗！\n因為開啟防護，請求缺少 Token，被銀行拒絕。");
+                    cleanup(); 
+                }, 800);
+            } else {
+                log("銀行檢查: Cookie 正確。", "info");
+                setTimeout(() => { 
+                    log("結果: 轉帳成功，攻擊完成！", "error"); 
+                    alert("攻擊成功！\n因為沒有 Token 檢查，銀行以為是用戶本人操作。");
+                    cleanup(); 
+                }, 800);
+            }
+        }
+
+        function cleanup() { isAnimating = false; btnAttack.disabled = false; btnToggle.disabled = false; }
+        function resetSim() {
+            if(isAnimating) return;
+            packet.style.opacity = 0; cookie.style.opacity = 0;
+            pathTrap.style.opacity = 0.3; pathTrap.style.stroke = "#dc3545";
+            pathAuto.style.opacity = 0;
+            pathAttack.style.opacity = 0.3; pathAttack.style.stroke = "#0066cc";
+            logPanel.innerHTML = "> 模擬已重置。";
+        }
+        updateUIState = toggleFix; // Hook for init if needed but we start false
+    </script>
+</body>
+</html>

@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>XSS 攻擊原理與防禦實測</title>
+    <style>
+        :root { --bg: #f0f2f5; --card: #fff; --primary: #007bff; --danger: #dc3545; --success: #28a745; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; background: var(--bg); padding: 20px; display: flex; flex-direction: column; align-items: center; }
+        
+        .container { background: var(--card); padding: 30px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); width: 100%; max-width: 800px; position: relative; }
+        h1 { text-align: center; color: #333; margin-bottom: 10px; }
+        p { text-align: center; color: #666; margin-bottom: 20px; }
+
+        /* Navigation */
+        .nav-btn { position: absolute; top: 20px; left: -140px; text-decoration: none; background: #333; color: white; padding: 8px 15px; border-radius: 4px; font-size: 14px; }
+        .nav-btn:hover { background: #555; }
+        @media (max-width: 1000px) { .nav-btn { position: static; display: block; margin-bottom: 15px; width: fit-content; } }
+
+        /* Security Switch */
+        .mode-switch { margin-bottom: 20px; padding: 15px; background: #fff3cd; border: 1px solid #ffeeba; border-radius: 8px; text-align: center; transition: all 0.3s; }
+        .mode-switch.secure { background: #d4edda; border-color: #c3e6cb; }
+        .switch-btn { margin-top: 10px; padding: 8px 16px; border: none; border-radius: 5px; font-weight: bold; cursor: pointer; transition: 0.2s; }
+        
+        /* Input Area */
+        .input-group { display: flex; gap: 10px; margin-bottom: 20px; }
+        input { flex: 1; padding: 12px; border: 1px solid #ddd; border-radius: 6px; font-size: 16px; }
+        .btn-submit { background: var(--primary); color: white; border: none; padding: 0 25px; border-radius: 6px; cursor: pointer; font-size: 16px; }
+        .btn-submit:hover { background: #0056b3; }
+
+        /* Payload Grid */
+        .payload-area { background: #f8f9fa; padding: 15px; border-radius: 8px; border: 1px solid #e9ecef; margin-bottom: 20px; }
+        .payload-title { font-size: 14px; font-weight: bold; color: #555; margin-bottom: 10px; display: block; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; }
+        .test-btn { padding: 6px 10px; font-size: 12px; border: 1px solid #ccc; background: white; border-radius: 4px; cursor: pointer; text-align: left; transition: 0.2s; }
+        .test-btn:hover { background: #e2e6ea; border-color: #adb5bd; }
+        .test-btn:active { transform: scale(0.98); }
+        .category-alert { border-left: 3px solid #e83e8c; }
+        .category-deface { border-left: 3px solid #fd7e14; }
+        .category-steal { border-left: 3px solid #dc3545; }
+        .category-style { border-left: 3px solid #6610f2; }
+
+        /* Comments */
+        .comments-section { border-top: 2px solid #eee; margin-top: 20px; padding-top: 10px; min-height: 100px; }
+        .comment { background: #fff; padding: 15px; margin-bottom: 10px; border-radius: 8px; border: 1px solid #e0e0e0; border-left: 5px solid var(--primary); word-break: break-all; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }
+        .comment-meta { font-size: 12px; color: #999; margin-bottom: 5px; }
+
+        /* Hacked Styles (for demo) */
+        .hacked-bg { background-color: black !important; color: lime !important; }
+        .hacked-title { font-family: "Courier New", monospace; text-align: center; color: red; font-size: 30px; font-weight: bold; background: black; padding: 20px; }
+        .fake-login { border: 2px dashed red; padding: 10px; background: #fff0f0; margin: 10px 0; }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <a href="csrf_demo.html" class="nav-btn">⬅ 回到 CSRF 演示</a>
+        <h1>XSS 漏洞實測實驗室</h1>
+        <p>測試網站是否正確過濾了使用者的惡意輸入</p>
+
+        <div id="securityPanel" class="mode-switch">
+            當前狀態：<strong style="color: #dc3545; font-size: 1.2em;">🔓 危險 (Raw HTML)</strong><br>
+            <small>網站直接使用 <code>innerHTML</code> 渲染內容，不進行任何過濾。</small><br>
+            <button onclick="toggleSecurity()" class="switch-btn" style="background:#dc3545; color: white;">切換為安全模式</button>
+        </div>
+
+        <div class="input-group">
+            <input type="text" id="userInput" placeholder="在此輸入留言或是點擊下方測試腳本..." autocomplete="off">
+            <button onclick="postComment()" class="btn-submit">送出</button>
+        </div>
+
+        <div class="payload-area">
+            <span class="payload-title">▼ 點擊載入攻擊 Payload (共 15 種)</span>
+            <div class="grid" id="buttonGrid">
+                </div>
+            <div style="margin-top:10px; text-align: right;">
+                <button onclick="clearComments()" style="font-size:12px; cursor:pointer; padding:5px 10px;">🗑️ 清空所有留言</button>
+            </div>
+        </div>
+
+        <h3>留言列表：</h3>
+        <div class="comments-section" id="commentsList">
+            </div>
+    </div>
+
+    <script>
+        // 狀態變數
+        let isSecure = false;
+
+        // 15 組 XSS 測試 Payload
+        const payloads = [
+            { cat: 'alert', label: '1. 基礎彈窗 (Img)', val: '<img src=x onerror=alert("XSS攻擊成功!")>' },
+            { cat: 'alert', label: '2. 數學運算彈窗', val: '<img src=x onerror=alert(100+200)>' },
+            { cat: 'alert', label: '3. 滑鼠滑過觸發', val: '<b onmouseover=alert("滑鼠陷阱!") style="font-size:20px;color:red;border:1px solid red;cursor:pointer">🔥 移到我上面試試</b>' },
+            { cat: 'alert', label: '4. 輸入框聚焦觸發', val: '<input onfocus=alert("聚焦觸發!") autofocus placeholder="自動聚焦陷阱">' },
+            { cat: 'alert', label: '5. Confirm 對話框', val: '<img src=x onerror=confirm("要下載病毒嗎?")>' },
+            
+            { cat: 'deface', label: '6. 惡意圖片植入', val: '看這張圖 <br><img src="https://media.giphy.com/media/YQitE4YNQNahy/giphy.gif" style="border:5px solid red; width:100%">' },
+            { cat: 'deface', label: '7. 更改背景 (黑)', val: '<style>body { background-color: #222 !important; filter: invert(1); }</style> 網站被我關燈了！' },
+            { cat: 'deface', label: '8. 巨型文字破壞', val: '<h1 style="font-size:80px; color:red; position:fixed; top:0; left:0; background:black; width:100%; z-index:9999;">網站被駭了</h1>' },
+            { cat: 'deface', label: '9. 跑馬燈 (Marquee)', val: '<marquee style="font-size:40px; color:blue; background:yellow">⚠️ 你的電腦中毒了 ⚠️ 請立即匯款</marquee>' },
+            { cat: 'deface', label: '10. 隱藏其他內容', val: '<style>.input-group, .payload-area { display: none !important; }</style>哈哈，你的輸入框不見了！' },
+
+            { cat: 'steal', label: '11. 偽造登入框', val: '<div class="fake-login">系統逾時，請重新登入：<br><input type="password" placeholder="輸入密碼"><button onclick=alert("密碼已傳送給駭客!")>登入</button></div>' },
+            { cat: 'steal', label: '12. 偽造下載按鈕', val: '<a href="javascript:alert(\'下載惡意軟體...\')" style="background:red; color:white; padding:10px; display:block; text-align:center; text-decoration:none;">🎁 點擊領取獎金</a>' },
+            { cat: 'steal', label: '13. 讀取 Cookie', val: '<img src=x onerror=alert("你的Cookie:\\n"+document.cookie)>' },
+            
+            { cat: 'style', label: '14. CSS 注入破壞', val: '<style>div { transform: rotate(2deg); }</style> 大家一起歪頭！' },
+            { cat: 'style', label: '15. Iframe 嵌入', val: '偷看別的網站：<iframe src="https://example.com" width="100%" height="200"></iframe>' }
+        ];
+
+        // 初始化按鈕
+        const grid = document.getElementById('buttonGrid');
+        payloads.forEach(p => {
+            const btn = document.createElement('button');
+            btn.className = `test-btn category-${p.cat}`;
+            btn.innerText = p.label;
+            btn.onclick = () => {
+                document.getElementById('userInput').value = p.val;
+                postComment();
+            };
+            grid.appendChild(btn);
+        });
+
+        // --- 核心功能 ---
+
+        // 1. 切換模式
+        function toggleSecurity() {
+            isSecure = !isSecure;
+            const panel = document.getElementById('securityPanel');
+            const btn = panel.querySelector('button');
+            
+            if (isSecure) {
+                panel.className = "mode-switch secure";
+                panel.innerHTML = `當前狀態：<strong style="color: #28a745; font-size: 1.2em;">🔒 安全 (Escaped)</strong><br><small>啟用 <code>escapeHtml()</code> 函式，將特殊符號轉換為 HTML 實體。</small><br><button onclick="toggleSecurity()" class="switch-btn" style="background:#28a745; color: white;">切換為危險模式</button>`;
+            } else {
+                panel.className = "mode-switch";
+                panel.innerHTML = `當前狀態：<strong style="color: #dc3545; font-size: 1.2em;">🔓 危險 (Raw HTML)</strong><br><small>網站直接使用 <code>innerHTML</code> 渲染內容，不進行任何過濾。</small><br><button onclick="toggleSecurity()" class="switch-btn" style="background:#dc3545; color: white;">切換為安全模式</button>`;
+            }
+            clearComments();
+        }
+
+        // 2. 真實的 XSS 防禦函式 (HTML Entity Encoding)
+        // 這就是 Checkmarx 要求你做的修復：將特殊字元轉義
+        function escapeHtml(unsafe) {
+            return unsafe
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;")
+                .replace(/'/g, "&#039;");
+        }
+
+        // 3. 發送留言
+        function postComment() {
+            const input = document.getElementById('userInput').value;
+            if (!input) return;
+
+            const list = document.getElementById('commentsList');
+            const newDiv = document.createElement('div');
+            newDiv.className = 'comment';
+
+            const meta = document.createElement('div');
+            meta.className = 'comment-meta';
+            const time = new Date().toLocaleTimeString();
+            
+            const contentDiv = document.createElement('div');
+
+            if (isSecure) {
+                // 安全模式：使用 escapeHtml 處理過後再放入
+                // 這樣瀏覽器會顯示出 <script> 字樣，但不會執行它
+                meta.innerText = `[安全模式] 匿名同學 於 ${time} 留言：`;
+                const safeContent = escapeHtml(input);
+                contentDiv.innerHTML = safeContent; 
+                // 注意：這裡雖然用了 innerHTML，但因為內容已經被 escapeHtml 處理過(沒有 < > 符號了)，所以是安全的
+            } else {
+                // 危險模式：直接塞入
+                meta.innerText = `[危險模式] 駭客 於 ${time} 植入：`;
+                contentDiv.innerHTML = input; 
+            }
+
+            newDiv.appendChild(meta);
+            newDiv.appendChild(contentDiv);
+            list.prepend(newDiv);
+        }
+
+        function clearComments() {
+            document.getElementById('commentsList').innerHTML = '';
+            // 重置一些可能被 CSS 破壞的樣式 (針對 Payload 7, 8, 10, 14)
+            document.body.style = ''; 
+            document.querySelector('.input-group').style.display = 'flex';
+            document.querySelector('.payload-area').style.display = 'block';
+            // 移除可能被植入的 style 標籤
+            document.querySelectorAll('style').forEach(s => {
+                if (!s.innerText.includes('root')) s.remove(); // 保留原本的 style
+            });
+        }
+    </script>
+</body>
+</html>
